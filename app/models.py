@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -64,3 +64,6 @@ class BotState(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     maintenance: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    stats_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    fastdic_requests: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    db_hits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

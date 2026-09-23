@@ -4,8 +4,9 @@ import logging
 import subprocess
 import threading
 from collections import defaultdict
-from datetime import datetime, timezone
-from time import time
+from datetime import datetime, timedelta, timezone
+from time import time, sleep
+from zoneinfo import ZoneInfo
 
 import requests
 import telebot
@@ -13,6 +14,7 @@ from telebot import apihelper
 from telebot.apihelper import ApiTelegramException
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from sqlalchemy import func
+from sqlalchemy import text as sql_text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -234,8 +236,52 @@ def _set_maintenance(on: bool) -> None:
         session.close()
 
 
+def _tz() -> ZoneInfo:
+    return ZoneInfo(settings.SUMMARY_TZ)
+
+
+def _local_date():
+    return datetime.now(_tz()).date()
+
+
 def _today_start() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None, hour=0, minute=0, second=0, microsecond=0)
+    now_local = datetime.now(_tz())
+    midnight_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight_local.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _bump_counter(kind: str) -> None:
+    col = "db_hits" if kind == "db" else "fastdic_requests"
+    other = "fastdic_requests" if kind == "db" else "db_hits"
+    try:
+        session = SessionLocal()
+        try:
+            session.execute(
+                sql_text(
+                    f"UPDATE bot_state SET "
+                    f"{col} = CASE WHEN stats_date = :today THEN {col} + 1 ELSE 1 END, "
+                    f"{other} = CASE WHEN stats_date = :today THEN {other} ELSE 0 END, "
+                    f"stats_date = :today WHERE id = 1"
+                ),
+                {"today": _local_date()},
+            )
+            session.commit()
+        finally:
+            session.close()
+    except Exception:
+        logger.debug("counter bump failed", exc_info=True)
+
+
+def _reset_counters() -> None:
+    session = SessionLocal()
+    try:
+        session.execute(
+            sql_text("UPDATE bot_state SET fastdic_requests = 0, db_hits = 0, stats_date = :d WHERE id = 1"),
+            {"d": _local_date()},
+        )
+        session.commit()
+    finally:
+        session.close()
 
 
 def _track_user(tg) -> None:
@@ -277,16 +323,23 @@ def _admin_stats_text() -> tuple[str, bool]:
         today_searches = session.query(func.count(Search.id)).filter(Search.searched_at >= today).scalar() or 0
         row = session.query(BotState).filter(BotState.id == 1).first()
         on = bool(row and row.maintenance)
+        fastdic = row.fastdic_requests if row and row.fastdic_requests else 0
+        dbhits = row.db_hits if row and row.db_hits else 0
+        cdate = row.stats_date.isoformat() if row and row.stats_date else "—"
+        stale = cdate != _local_date().isoformat()
     finally:
         session.close()
     state = "🔴 Offline" if on else "🟢 Online"
+    day_note = f" ({cdate})" if stale else ""
     text = (
         f"*📊 Bot Status:* {state}\n\n"
         f"👥 All users: *{all_users}*\n"
         f"📅 Active today: *{today_users}*\n"
         f"🆕 New today: *{new_today}*\n"
         f"🔍 Total searches: *{total_searches}*\n"
-        f"🔍 Searches today: *{today_searches}*"
+        f"🔍 Searches today: *{today_searches}*\n"
+        f"🌐 Fastdic requests today{day_note}: *{fastdic}*\n"
+        f"💾 DB cache hits today{day_note}: *{dbhits}*"
     )
     return text, on
 
@@ -762,6 +815,7 @@ def handle_word(message):
         word = _get_word(session, text, direction)
         if word:
             logger.info("Cache hit for '%s' (id=%s)", text, word.id)
+            _bump_counter("db")
             session.add(Search(user_id=user_id, word_id=word.id))
             session.commit()
             reply = _format_reply(word)
@@ -780,6 +834,7 @@ def handle_word(message):
         session.close()
 
     logger.info("Cache miss for '%s' (%s), scraping...", text, direction)
+    _bump_counter("fast")
     try:
         data = scrape_word(text)
     except Exception:
@@ -831,3 +886,26 @@ def handle_word(message):
             logger.exception("Failed to edit error message")
     finally:
         session.close()
+
+
+def _midnight_summary_loop() -> None:
+    # ponytail: process-local timer — missed only if the bot is down at midnight
+    while True:
+        now = datetime.now(_tz())
+        next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        sleep(max((next_midnight - now).total_seconds(), 1) + 5)
+        try:
+            stats, maintenance_on = _admin_stats_text()
+            summary = f"*🕛 Daily Summary*\n\n{stats}"
+            for admin_id in _admin_ids():
+                try:
+                    bot.send_message(admin_id, summary, reply_markup=_admin_toggle_markup(maintenance_on), parse_mode="Markdown")
+                except Exception:
+                    logger.exception("Failed to send daily summary to admin %s", admin_id)
+            _reset_counters()
+            logger.info("Daily summary sent to %s admins, counters reset", len(_admin_ids()))
+        except Exception:
+            logger.exception("Daily summary failed")
+
+
+threading.Thread(target=_midnight_summary_loop, daemon=True).start()

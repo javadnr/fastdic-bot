@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = "fastdic_bot"
     FOOTER: str = "@Kiteck_TM"
     ADMIN_IDS: str = ""
+    SUMMARY_TZ: str = "Asia/Tehran"
 
     model_config = {"env_file": ".env"}
 
