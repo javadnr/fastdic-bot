@@ -1,4 +1,5 @@
 import io
+import json
 import logging
 import subprocess
 import threading
@@ -17,6 +18,27 @@ from sqlalchemy.orm import Session
 
 apihelper.API_URL = "https://tapi.bale.ai/bot{0}/{1}"
 apihelper.FILE_URL = "https://tapi.bale.ai/file/bot{0}/{1}"
+
+
+def _request_sender(method, url, params=None, files=None, timeout=None, proxies=None):
+    # telebot puts payload in `params` (URL query) — large messages trigger nginx 414.
+    # POST JSON body instead; files stay multipart. telebot also JSON-stringifies
+    # nested objects (reply_markup, reply_parameters) — decode them for the body.
+    if files:
+        return requests.request(method, url, data=params, files=files, timeout=timeout, proxies=proxies)
+    if method.upper() == "POST":
+        payload = dict(params or {})
+        for key, value in payload.items():
+            if isinstance(value, str) and value[:1] in "[{":
+                try:
+                    payload[key] = json.loads(value)
+                except ValueError:
+                    pass
+        return requests.request(method, url, json=payload, timeout=timeout, proxies=proxies)
+    return requests.request(method, url, params=params, timeout=timeout, proxies=proxies)
+
+
+apihelper.CUSTOM_REQUEST_SENDER = _request_sender
 
 from app.config import REQUIRED_CHANNELS, settings
 from app.database import SessionLocal
@@ -126,12 +148,17 @@ def _membership_statuses(user_id: int) -> dict[str, bool]:
             logger.warning("getChatMember failed: channel=%s user=%s err=%s", chat_id, user_id, e, exc_info=True)
             statuses[chat_id] = False
     logger.info("Membership: user=%s %s", user_id, statuses)
-    with _member_lock:
-        _member_cache[user_id] = (now + MEMBER_TTL, statuses)
-        if len(_member_cache) > 5000:
-            for uid, (exp, _) in list(_member_cache.items()):
-                if exp <= now:
-                    _member_cache.pop(uid, None)
+    if all(statuses.values()):
+        # Cache only fully-joined users so a freshly joined member isn't blocked for 60s
+        with _member_lock:
+            _member_cache[user_id] = (now + MEMBER_TTL, statuses)
+            if len(_member_cache) > 5000:
+                for uid, (exp, _) in list(_member_cache.items()):
+                    if exp <= now:
+                        _member_cache.pop(uid, None)
+    else:
+        with _member_lock:
+            _member_cache.pop(user_id, None)
     return statuses
 
 
