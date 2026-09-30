@@ -889,11 +889,13 @@ def handle_word(message):
 
 
 def _midnight_summary_loop() -> None:
-    # ponytail: process-local timer — missed only if the bot is down at midnight
+    # ponytail: process-local timer — missed only if the bot is down at report time
     while True:
         now = datetime.now(_tz())
-        next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        sleep(max((next_midnight - now).total_seconds(), 1) + 5)
+        report_time = now.replace(hour=23, minute=58, second=0, microsecond=0)
+        if report_time <= now:
+            report_time += timedelta(days=1)
+        sleep(max((report_time - now).total_seconds(), 1))
         try:
             stats, maintenance_on = _admin_stats_text()
             summary = f"*🕛 Daily Summary*\n\n{stats}"

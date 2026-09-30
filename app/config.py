@@ -2,7 +2,6 @@ from pydantic_settings import BaseSettings
 
 REQUIRED_CHANNELS = {
     "4818711476": "https://ble.ir/kiteck_tm",
-    "5171266720": "https://ble.ir/lingrowth",
 }
 
 
